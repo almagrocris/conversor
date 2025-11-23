@@ -1,2 +1,4 @@
 pandoc
 wkhtmltopdf
+antiword
+catdoc
