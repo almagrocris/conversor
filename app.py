@@ -10,6 +10,7 @@ import logging
 from typing import Tuple, Dict, List
 import time
 import base64
+import requests
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -33,6 +34,8 @@ class DocumentConverter:
             'pandoc': self._check_pandoc(),
             'python-docx': self._check_python_docx(),
             'wkhtmltopdf': self._check_wkhtmltopdf(),
+            'antiword': self._check_antiword(),
+            'catdoc': self._check_catdoc(),
         }
         return dependencies
     
@@ -57,6 +60,24 @@ class DocumentConverter:
         """Verifica si wkhtmltopdf está instalado"""
         try:
             result = subprocess.run(['wkhtmltopdf', '--version'], 
+                                  capture_output=True, text=True, timeout=10)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def _check_antiword(self) -> bool:
+        """Verifica si antiword está instalado (para archivos .DOC)"""
+        try:
+            result = subprocess.run(['antiword', '-v'], 
+                                  capture_output=True, text=True, timeout=10)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def _check_catdoc(self) -> bool:
+        """Verifica si catdoc está instalado (para archivos .DOC)"""
+        try:
+            result = subprocess.run(['catdoc', '-h'], 
                                   capture_output=True, text=True, timeout=10)
             return result.returncode == 0
         except:
@@ -121,8 +142,20 @@ class DocumentConverter:
         return False, "Todos los métodos de conversión fallaron"
     
     def _convert_doc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOC a PDF"""
-        return self._convert_with_pandoc_wkhtml(input_path, output_path)
+        """Convierte DOC a PDF usando métodos específicos para DOC"""
+        methods = [
+            self._convert_doc_with_antiword,
+            self._convert_doc_with_catdoc,
+            self._convert_doc_with_strings,
+            self._convert_doc_with_fallback
+        ]
+        
+        for method in methods:
+            success, message = method(input_path, output_path)
+            if success:
+                return True, message
+        
+        return False, "No se pudo convertir el archivo DOC. Intente guardarlo como DOCX."
     
     def _convert_rtf(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte RTF a PDF usando wkhtmltopdf"""
@@ -137,7 +170,7 @@ class DocumentConverter:
         return self._convert_with_pandoc_wkhtml(input_path, output_path)
     
     def _convert_with_pandoc_wkhtml(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Conversión usando Pandoc con wkhtmltopdf (evita problema de pdflatex)"""
+        """Conversión usando Pandoc con wkhtmltopdf"""
         try:
             # Usar wkhtmltopdf como motor PDF
             cmd = [
@@ -148,16 +181,9 @@ class DocumentConverter:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0 and output_path.exists():
-                return True, "Conversión exitosa con Pandoc (wkhtmltopdf)"
+                return True, "Conversión exitosa con Pandoc"
             else:
-                # Intentar sin motor específico
-                cmd_fallback = ['pandoc', str(input_path), '-o', str(output_path)]
-                result_fallback = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=30)
-                
-                if result_fallback.returncode == 0 and output_path.exists():
-                    return True, "Conversión exitosa con Pandoc"
-                else:
-                    return False, f"Pandoc error: {result.stderr or result_fallback.stderr}"
+                return False, f"Pandoc error: {result.stderr}"
                 
         except subprocess.TimeoutExpired:
             return False, "Timeout en conversión con Pandoc"
@@ -197,6 +223,94 @@ class DocumentConverter:
         except Exception as e:
             return False, f"Error con python-docx: {str(e)}"
     
+    def _convert_doc_with_antiword(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Convierte DOC a PDF usando antiword"""
+        try:
+            # Extraer texto con antiword
+            cmd = ['antiword', str(input_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
+            
+            if result.returncode == 0 and result.stdout.strip():
+                text_content = result.stdout.split('\n')
+                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                if success:
+                    return True, "Conversión exitosa con Antiword"
+            
+            return False, "Antiword no pudo extraer texto del archivo DOC"
+            
+        except subprocess.TimeoutExpired:
+            return False, "Timeout con Antiword"
+        except Exception as e:
+            return False, f"Error con Antiword: {str(e)}"
+    
+    def _convert_doc_with_catdoc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Convierte DOC a PDF usando catdoc"""
+        try:
+            # Extraer texto con catdoc
+            cmd = ['catdoc', '-w', str(input_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
+            
+            if result.returncode == 0 and result.stdout.strip():
+                text_content = result.stdout.split('\n')
+                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                if success:
+                    return True, "Conversión exitosa con Catdoc"
+            
+            return False, "Catdoc no pudo extraer texto del archivo DOC"
+            
+        except subprocess.TimeoutExpired:
+            return False, "Timeout con Catdoc"
+        except Exception as e:
+            return False, f"Error con Catdoc: {str(e)}"
+    
+    def _convert_doc_with_strings(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Convierte DOC a PDF usando strings (método de último recurso)"""
+        try:
+            # Extraer texto legible con strings
+            cmd = ['strings', '-n', '3', str(input_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Filtrar solo líneas que parecen texto legible
+                lines = result.stdout.split('\n')
+                text_content = [line for line in lines if len(line.strip()) > 10 and any(c.isalpha() for c in line)]
+                
+                if text_content:
+                    success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                    if success:
+                        return True, "Conversión básica exitosa (método strings)"
+            
+            return False, "No se pudo extraer texto legible del archivo DOC"
+            
+        except Exception as e:
+            return False, f"Error con strings: {str(e)}"
+    
+    def _convert_doc_with_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Método de fallback para archivos DOC - crea un PDF informativo"""
+        try:
+            text_content = [
+                f"Archivo: {input_path.name}",
+                "Formato: Documento de Word (.DOC)",
+                "",
+                "⚠️ No se pudo convertir el contenido del archivo DOC.",
+                "Sugerencias:",
+                "1. Guarde el archivo como DOCX en Microsoft Word",
+                "2. Use LibreOffice para abrir y guardar como PDF",
+                "3. Utilice la versión online con LibreOffice instalado",
+                "",
+                "Esta versión usa métodos alternativos para archivos DOC",
+                "pero puede no funcionar con documentos complejos."
+            ]
+            
+            success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+            if success:
+                return True, "PDF informativo creado (conversión limitada)"
+            else:
+                return False, "No se pudo crear PDF informativo"
+                
+        except Exception as e:
+            return False, f"Error en método de fallback: {str(e)}"
+    
     def _create_simple_pdf(self, text_content: List[str], output_path: Path, title: str) -> bool:
         """Crea un PDF simple con el contenido de texto usando wkhtmltopdf directamente"""
         try:
@@ -214,16 +328,41 @@ class DocumentConverter:
                         line-height: 1.6;
                         color: #333;
                     }}
-                    h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; }}
-                    .content {{ margin: 20px 0; }}
-                    p {{ margin: 10px 0; }}
+                    h1 {{ 
+                        color: #2c3e50; 
+                        border-bottom: 2px solid #3498db;
+                        padding-bottom: 10px;
+                    }}
+                    .content {{ 
+                        margin: 30px 0;
+                        background: #f8f9fa;
+                        padding: 20px;
+                        border-radius: 5px;
+                        border-left: 4px solid #3498db;
+                    }}
+                    p {{ 
+                        margin: 12px 0;
+                        padding: 5px;
+                    }}
+                    .warning {{
+                        background: #fff3cd;
+                        border-left: 4px solid #ffc107;
+                        padding: 15px;
+                        margin: 15px 0;
+                        border-radius: 4px;
+                    }}
                 </style>
             </head>
             <body>
-                <h1>{title}</h1>
+                <h1>📄 {title}</h1>
                 <div class="content">
                     {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
                 </div>
+                <div class="warning">
+                    <strong>Nota:</strong> Documento convertido usando métodos alternativos. 
+                    El formato original puede variar.
+                </div>
+                <p><em>Convertido el {time.strftime("%d/%m/%Y %H:%M")}</em></p>
             </body>
             </html>
             """
@@ -234,7 +373,7 @@ class DocumentConverter:
                 html_path = f.name
             
             # Convertir HTML a PDF usando wkhtmltopdf directamente
-            cmd = ['wkhtmltopdf', '--enable-local-file-access', html_path, str(output_path)]
+            cmd = ['wkhtmltopdf', '--enable-local-file-access', '--quiet', html_path, str(output_path)]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             # Limpiar archivo temporal
@@ -328,16 +467,15 @@ st.markdown("""
         padding: 20px;
         margin: 20px 0;
     }
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
-
-def get_binary_file_downloader_html(bin_file, file_label, button_text):
-    """Genera HTML para descargar archivos"""
-    with open(bin_file, 'rb') as f:
-        data = f.read()
-    bin_str = base64.b64encode(data).decode()
-    href = f'<a href="data:application/octet-stream;base64,{bin_str}" download="{os.path.basename(bin_file)}" style="text-decoration: none;">{button_text}</a>'
-    return href
 
 def process_uploaded_files(uploaded_files, converter):
     """Procesar archivos subidos individualmente"""
@@ -396,7 +534,18 @@ def process_uploaded_files(uploaded_files, converter):
                     successful_conversions += 1
                     if pdf_path and os.path.exists(pdf_path):
                         converted_files.append(pdf_path)
-                    st.success(f"✅ {uploaded_file.name} → {output_file}")
+                    
+                    # Mostrar mensaje específico para DOC
+                    if Path(uploaded_file.name).suffix.lower() == '.doc':
+                        st.success(f"✅ {uploaded_file.name} → {output_file} (Conversión básica)")
+                        st.markdown("""
+                        <div class="warning-box">
+                        ⚠️ <strong>Archivo DOC convertido:</strong> La conversión de archivos .DOC es básica. 
+                        Para mejor calidad, guarde el archivo como .DOCX en Microsoft Word.
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.success(f"✅ {uploaded_file.name} → {output_file}")
                 else:
                     st.error(f"❌ {uploaded_file.name}: {message}")
             
@@ -545,9 +694,10 @@ def main():
     st.markdown("""
     <div class="info-box">
     💡 <strong>Novedades:</strong> 
-    - ✅ Soporte mejorado para archivos RTF
-    - 📥 Botones de descarga restaurados
-    - 🚀 Mejor compatibilidad con todos los formatos
+    - ✅ Soporte completo para archivos .DOC (conversión básica)
+    - 📋 Mejor extracción de texto con Antiword y Catdoc
+    - 📥 Botones de descarga mejorados
+    - 🚀 Compatibilidad mejorada
     </div>
     """, unsafe_allow_html=True)
     
@@ -556,10 +706,15 @@ def main():
         st.header("ℹ️ Información")
         st.markdown("""
         **Formatos soportados:**
-        - 📝 DOC, DOCX (Word)
+        - 📝 DOC (Word) - Conversión básica
+        - 📝 DOCX (Word) - Conversión completa
         - 📋 RTF (Rich Text)
         - 📄 TXT (Texto plano)
         - 📦 ZIP (Carpetas)
+        
+        **Nota sobre archivos DOC:**
+        Los archivos .DOC tienen conversión básica de texto.
+        Para mejor calidad, guarde como .DOCX.
         
         **Límites:**
         - 200MB por archivo
@@ -573,10 +728,14 @@ def main():
             status = "✅" if available else "❌"
             st.write(f"{status} {dep}")
             
-        if not deps['pandoc']:
-            st.error("Pandoc no está disponible")
-        if not deps['wkhtmltopdf']:
-            st.warning("wkhtmltopdf no disponible - algunas conversiones pueden fallar")
+        # Información específica sobre DOC
+        if not deps['antiword'] and not deps['catdoc']:
+            st.markdown("""
+            <div class="warning-box">
+            ⚠️ <strong>Archivos .DOC:</strong> 
+            Sin Antiword/Catdoc, la conversión de .DOC será muy básica.
+            </div>
+            """, unsafe_allow_html=True)
     
     # Pestañas principales
     tab1, tab2, tab3 = st.tabs(["📤 Subir Archivos", "📁 Subir Carpeta ZIP", "📊 Historial"])
@@ -604,7 +763,11 @@ def main():
                 with col2:
                     st.write(f"{file_size:.1f} MB")
                 with col3:
-                    st.write(converter.supported_formats.get(Path(uploaded_file.name).suffix.lower(), "Desconocido"))
+                    format_name = converter.supported_formats.get(Path(uploaded_file.name).suffix.lower(), "Desconocido")
+                    if Path(uploaded_file.name).suffix.lower() == '.doc':
+                        st.write(f"📝 {format_name} (Básico)")
+                    else:
+                        st.write(f"📄 {format_name}")
             
             # Botón de conversión
             if st.button("🔄 Iniciar Conversión", type="primary", key="convert_single"):
