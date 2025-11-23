@@ -10,7 +10,6 @@ import logging
 from typing import Tuple, Dict, List
 import time
 import base64
-import requests
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -34,8 +33,6 @@ class DocumentConverter:
             'pandoc': self._check_pandoc(),
             'python-docx': self._check_python_docx(),
             'wkhtmltopdf': self._check_wkhtmltopdf(),
-            'antiword': self._check_antiword(),
-            'catdoc': self._check_catdoc(),
         }
         return dependencies
     
@@ -65,25 +62,7 @@ class DocumentConverter:
         except:
             return False
     
-    def _check_antiword(self) -> bool:
-        """Verifica si antiword está instalado (para archivos .DOC)"""
-        try:
-            result = subprocess.run(['antiword', '-v'], 
-                                  capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except:
-            return False
-    
-    def _check_catdoc(self) -> bool:
-        """Verifica si catdoc está instalado (para archivos .DOC)"""
-        try:
-            result = subprocess.run(['catdoc', '-h'], 
-                                  capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except:
-            return False
-    
-    def convert_document(self, input_path: str, output_dir: str = None) -> Tuple[bool, str, str]:
+    def convert_document(self, input_path: str, output_path: str = None) -> Tuple[bool, str, str]:
         """Convierte un documento a PDF - retorna (éxito, mensaje, ruta_pdf)"""
         input_path = Path(input_path)
         
@@ -93,10 +72,11 @@ class DocumentConverter:
         if input_path.stat().st_size > self.max_file_size:
             return False, f"Archivo demasiado grande: {input_path}", ""
         
-        if output_dir is None:
-            output_dir = input_path.parent
-        
-        output_path = Path(output_dir) / f"{input_path.stem}.pdf"
+        # Usar el nombre original pero con extensión .pdf
+        if output_path is None:
+            output_path = input_path.parent / f"{input_path.stem}.pdf"
+        else:
+            output_path = Path(output_path)
         
         try:
             # Seleccionar método de conversión según la extensión
@@ -144,9 +124,8 @@ class DocumentConverter:
     def _convert_doc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte DOC a PDF usando métodos específicos para DOC"""
         methods = [
-            self._convert_doc_with_antiword,
-            self._convert_doc_with_catdoc,
-            self._convert_doc_with_strings,
+            self._convert_doc_with_python_docx_fallback,
+            self._convert_doc_with_text_extraction,
             self._convert_doc_with_fallback
         ]
         
@@ -223,67 +202,106 @@ class DocumentConverter:
         except Exception as e:
             return False, f"Error con python-docx: {str(e)}"
     
-    def _convert_doc_with_antiword(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOC a PDF usando antiword"""
+    def _convert_doc_with_python_docx_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Intenta leer DOC como DOCX (puede funcionar en algunos casos)"""
         try:
-            # Extraer texto con antiword
-            cmd = ['antiword', str(input_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
+            # Algunos archivos DOC pueden ser leídos por python-docx
+            from docx import Document
             
-            if result.returncode == 0 and result.stdout.strip():
-                text_content = result.stdout.split('\n')
+            doc = Document(input_path)
+            text_content = []
+            
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content.append(paragraph.text)
+            
+            if text_content:
                 success = self._create_simple_pdf(text_content, output_path, input_path.stem)
                 if success:
-                    return True, "Conversión exitosa con Antiword"
+                    return True, "Conversión básica exitosa (DOC leído como DOCX)"
             
-            return False, "Antiword no pudo extraer texto del archivo DOC"
+            return False, "No se pudo leer el archivo DOC con python-docx"
             
-        except subprocess.TimeoutExpired:
-            return False, "Timeout con Antiword"
         except Exception as e:
-            return False, f"Error con Antiword: {str(e)}"
+            return False, f"Error leyendo DOC: {str(e)}"
     
-    def _convert_doc_with_catdoc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOC a PDF usando catdoc"""
+    def _convert_doc_with_text_extraction(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Extrae texto de archivos DOC usando métodos nativos de Python"""
         try:
-            # Extraer texto con catdoc
-            cmd = ['catdoc', '-w', str(input_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
+            # Método 1: Intentar leer como texto binario
+            text_content = self._extract_text_from_binary_doc(input_path)
             
-            if result.returncode == 0 and result.stdout.strip():
-                text_content = result.stdout.split('\n')
+            if not text_content:
+                # Método 2: Usar strings para extraer texto legible
+                text_content = self._extract_text_with_strings(input_path)
+            
+            if text_content:
                 success = self._create_simple_pdf(text_content, output_path, input_path.stem)
                 if success:
-                    return True, "Conversión exitosa con Catdoc"
-            
-            return False, "Catdoc no pudo extraer texto del archivo DOC"
-            
-        except subprocess.TimeoutExpired:
-            return False, "Timeout con Catdoc"
-        except Exception as e:
-            return False, f"Error con Catdoc: {str(e)}"
-    
-    def _convert_doc_with_strings(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOC a PDF usando strings (método de último recurso)"""
-        try:
-            # Extraer texto legible con strings
-            cmd = ['strings', '-n', '3', str(input_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8', errors='ignore')
-            
-            if result.returncode == 0 and result.stdout.strip():
-                # Filtrar solo líneas que parecen texto legible
-                lines = result.stdout.split('\n')
-                text_content = [line for line in lines if len(line.strip()) > 10 and any(c.isalpha() for c in line)]
-                
-                if text_content:
-                    success = self._create_simple_pdf(text_content, output_path, input_path.stem)
-                    if success:
-                        return True, "Conversión básica exitosa (método strings)"
+                    return True, "Conversión básica exitosa (extracción de texto)"
             
             return False, "No se pudo extraer texto legible del archivo DOC"
             
         except Exception as e:
-            return False, f"Error con strings: {str(e)}"
+            return False, f"Error en extracción de texto: {str(e)}"
+    
+    def _extract_text_from_binary_doc(self, input_path: Path) -> List[str]:
+        """Intenta extraer texto de archivos DOC leyendo como binario"""
+        try:
+            with open(input_path, 'rb') as f:
+                content = f.read()
+            
+            # Decodificar intentando diferentes codificaciones
+            text_content = []
+            for encoding in ['utf-8', 'latin-1', 'cp1252']:
+                try:
+                    decoded = content.decode(encoding, errors='ignore')
+                    # Filtrar líneas que parecen texto legible
+                    lines = decoded.split('\n')
+                    readable_lines = [
+                        line.strip() for line in lines 
+                        if len(line.strip()) > 3 
+                        and any(c.isalpha() for c in line)
+                        and not all(c in '�?�' for c in line.strip())
+                    ]
+                    if readable_lines:
+                        text_content = readable_lines
+                        break
+                except:
+                    continue
+            
+            return text_content
+            
+        except Exception as e:
+            logger.error(f"Error en extracción binaria: {e}")
+            return []
+    
+    def _extract_text_with_strings(self, input_path: Path) -> List[str]:
+        """Extrae texto legible usando el comando strings"""
+        try:
+            result = subprocess.run(
+                ['strings', '-n', '4', str(input_path)], 
+                capture_output=True, text=True, timeout=30, 
+                encoding='utf-8', errors='ignore'
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.split('\n')
+                # Filtrar líneas que parecen texto legible
+                text_content = [
+                    line.strip() for line in lines 
+                    if len(line.strip()) > 10 
+                    and any(c.isalpha() for c in line)
+                    and not line.strip().startswith('%%%%')
+                    and not all(c in '.-=*' for c in line.strip())
+                ]
+                return text_content
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error con strings: {e}")
+            return []
     
     def _convert_doc_with_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Método de fallback para archivos DOC - crea un PDF informativo"""
@@ -292,14 +310,21 @@ class DocumentConverter:
                 f"Archivo: {input_path.name}",
                 "Formato: Documento de Word (.DOC)",
                 "",
-                "⚠️ No se pudo convertir el contenido del archivo DOC.",
-                "Sugerencias:",
-                "1. Guarde el archivo como DOCX en Microsoft Word",
-                "2. Use LibreOffice para abrir y guardar como PDF",
-                "3. Utilice la versión online con LibreOffice instalado",
+                "ℹ️ Información sobre la conversión:",
+                "Este archivo .DOC no pudo ser convertido completamente.",
+                "Los archivos .DOC antiguos tienen formato binario",
+                "y requieren herramientas especializadas para su conversión.",
                 "",
-                "Esta versión usa métodos alternativos para archivos DOC",
-                "pero puede no funcionar con documentos complejos."
+                "💡 Sugerencias:",
+                "1. Abra el archivo en Microsoft Word y guárdelo como .DOCX",
+                "2. Use LibreOffice para abrir y guardar como PDF",
+                "3. Utilice una versión local con LibreOffice instalado",
+                "",
+                "📞 Soporte:",
+                "Para conversión completa de archivos .DOC,",
+                "se recomienda usar la aplicación local con LibreOffice.",
+                "",
+                f"📅 Fecha de intento: {time.strftime('%d/%m/%Y %H:%M')}"
             ]
             
             success = self._create_simple_pdf(text_content, output_path, input_path.stem)
@@ -351,6 +376,13 @@ class DocumentConverter:
                         margin: 15px 0;
                         border-radius: 4px;
                     }}
+                    .info {{
+                        background: #d1ecf1;
+                        border-left: 4px solid #17a2b8;
+                        padding: 15px;
+                        margin: 15px 0;
+                        border-radius: 4px;
+                    }}
                 </style>
             </head>
             <body>
@@ -358,11 +390,10 @@ class DocumentConverter:
                 <div class="content">
                     {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
                 </div>
-                <div class="warning">
-                    <strong>Nota:</strong> Documento convertido usando métodos alternativos. 
-                    El formato original puede variar.
+                <div class="info">
+                    <strong>Convertido el {time.strftime("%d/%m/%Y a las %H:%M")}</strong><br>
+                    Sistema de conversión de documentos
                 </div>
-                <p><em>Convertido el {time.strftime("%d/%m/%Y %H:%M")}</em></p>
             </body>
             </html>
             """
@@ -398,7 +429,13 @@ class DocumentConverter:
                 # Convertir todos los archivos soportados
                 for file_path in Path(temp_dir).rglob('*'):
                     if file_path.is_file() and file_path.suffix.lower() in self.supported_formats:
-                        success, message, pdf_path = self.convert_document(file_path, output_dir)
+                        # Definir ruta de salida con nombre original
+                        if output_dir:
+                            pdf_output_path = Path(output_dir) / f"{file_path.stem}.pdf"
+                        else:
+                            pdf_output_path = file_path.parent / f"{file_path.stem}.pdf"
+                        
+                        success, message, pdf_path = self.convert_document(file_path, pdf_output_path)
                         results[file_path.name] = (success, message, pdf_path)
                 
             except Exception as e:
@@ -496,137 +533,149 @@ def process_uploaded_files(uploaded_files, converter):
     converted_files = []
     conversion_results = []
     
-    with results_container:
-        st.subheader("📊 Progreso de Conversión")
-        
-        for i, uploaded_file in enumerate(uploaded_files):
-            status_text.text(f"🔄 Procesando {i+1}/{total_files}: {uploaded_file.name}")
+    # Crear directorio temporal para los PDFs
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with results_container:
+            st.subheader("📊 Progreso de Conversión")
             
-            # Guardar archivo temporal
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                tmp_path = tmp_file.name
-            
-            try:
-                # Convertir archivo
-                success, message, pdf_path = converter.convert_document(tmp_path)
+            for i, uploaded_file in enumerate(uploaded_files):
+                status_text.text(f"🔄 Procesando {i+1}/{total_files}: {uploaded_file.name}")
                 
-                # Registrar en historial
-                timestamp = time.strftime("%H:%M:%S")
-                output_file = f"{Path(uploaded_file.name).stem}.pdf"
+                # Guardar archivo temporal con nombre original
+                original_name = Path(uploaded_file.name).stem
+                temp_input_path = Path(temp_dir) / uploaded_file.name
+                temp_output_path = Path(temp_dir) / f"{original_name}.pdf"
                 
-                st.session_state.conversion_history.append({
-                    'timestamp': timestamp,
-                    'input': uploaded_file.name,
-                    'output': output_file if success else "N/A",
-                    'success': success,
-                    'message': message
-                })
-                
-                conversion_results.append({
-                    'original_name': uploaded_file.name,
-                    'success': success,
-                    'message': message,
-                    'pdf_path': pdf_path
-                })
-                
-                if success:
-                    successful_conversions += 1
-                    if pdf_path and os.path.exists(pdf_path):
-                        converted_files.append(pdf_path)
-                    
-                    # Mostrar mensaje específico para DOC
-                    if Path(uploaded_file.name).suffix.lower() == '.doc':
-                        st.success(f"✅ {uploaded_file.name} → {output_file} (Conversión básica)")
-                        st.markdown("""
-                        <div class="warning-box">
-                        ⚠️ <strong>Archivo DOC convertido:</strong> La conversión de archivos .DOC es básica. 
-                        Para mejor calidad, guarde el archivo como .DOCX en Microsoft Word.
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        st.success(f"✅ {uploaded_file.name} → {output_file}")
-                else:
-                    st.error(f"❌ {uploaded_file.name}: {message}")
-            
-            except Exception as e:
-                error_msg = f"Error procesando {uploaded_file.name}: {str(e)}"
-                st.error(f"❌ {error_msg}")
-                st.session_state.conversion_history.append({
-                    'timestamp': time.strftime("%H:%M:%S"),
-                    'input': uploaded_file.name,
-                    'output': "N/A",
-                    'success': False,
-                    'message': error_msg
-                })
-            
-            finally:
-                # Limpiar archivo temporal
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            
-            progress_bar.progress((i + 1) / total_files)
-    
-    status_text.text("")
-    
-    # Mostrar sección de descargas
-    if successful_conversions > 0:
-        st.markdown("---")
-        st.markdown('<div class="download-section">', unsafe_allow_html=True)
-        st.subheader("📥 Descargar Archivos Convertidos")
-        
-        if successful_conversions == 1:
-            # Descarga individual
-            pdf_path = converted_files[0]
-            original_name = Path(conversion_results[0]['original_name']).stem
-            download_name = f"{original_name}.pdf"
-            
-            with open(pdf_path, 'rb') as f:
-                st.download_button(
-                    label=f"📄 Descargar {download_name}",
-                    data=f,
-                    file_name=download_name,
-                    mime="application/pdf",
-                    type="primary",
-                    key="single_download"
-                )
-                
-        else:
-            # Descarga múltiple - crear ZIP
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.write(f"**{successful_conversions} archivos convertidos exitosamente**")
-                
-            with col2:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
-                    zip_path = tmp_zip.name
+                with open(temp_input_path, 'wb') as f:
+                    f.write(uploaded_file.getvalue())
                 
                 try:
-                    with zipfile.ZipFile(zip_path, 'w') as zipf:
-                        for pdf_file in converted_files:
-                            if os.path.exists(pdf_file):
-                                zipf.write(pdf_file, os.path.basename(pdf_file))
+                    # Convertir archivo - especificar ruta de salida con nombre original
+                    success, message, pdf_path = converter.convert_document(temp_input_path, temp_output_path)
                     
-                    with open(zip_path, 'rb') as f:
-                        st.download_button(
-                            label="📦 Descargar todos los PDFs (ZIP)",
-                            data=f,
-                            file_name="documentos_convertidos.zip",
-                            mime="application/zip",
-                            type="primary",
-                            key="zip_download"
-                        )
+                    # Registrar en historial
+                    timestamp = time.strftime("%H:%M:%S")
+                    output_file = f"{original_name}.pdf"
+                    
+                    st.session_state.conversion_history.append({
+                        'timestamp': timestamp,
+                        'input': uploaded_file.name,
+                        'output': output_file if success else "N/A",
+                        'success': success,
+                        'message': message
+                    })
+                    
+                    conversion_results.append({
+                        'original_name': uploaded_file.name,
+                        'pdf_name': output_file,
+                        'success': success,
+                        'message': message,
+                        'pdf_path': pdf_path if success else None
+                    })
+                    
+                    if success:
+                        successful_conversions += 1
+                        if pdf_path and os.path.exists(pdf_path):
+                            converted_files.append({
+                                'path': pdf_path,
+                                'name': output_file
+                            })
+                        
+                        # Mostrar mensaje específico para DOC
+                        if Path(uploaded_file.name).suffix.lower() == '.doc':
+                            st.success(f"✅ {uploaded_file.name} → {output_file}")
+                            st.markdown("""
+                            <div class="warning-box">
+                            ⚠️ <strong>Archivo DOC convertido:</strong> Conversión básica de texto. 
+                            Para mejor calidad y formato completo, guarde como .DOCX.
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.success(f"✅ {uploaded_file.name} → {output_file}")
+                    else:
+                        st.error(f"❌ {uploaded_file.name}: {message}")
+                
+                except Exception as e:
+                    error_msg = f"Error procesando {uploaded_file.name}: {str(e)}"
+                    st.error(f"❌ {error_msg}")
+                    st.session_state.conversion_history.append({
+                        'timestamp': time.strftime("%H:%M:%S"),
+                        'input': uploaded_file.name,
+                        'output': "N/A",
+                        'success': False,
+                        'message': error_msg
+                    })
+                
                 finally:
-                    if os.path.exists(zip_path):
-                        os.unlink(zip_path)
+                    # Limpiar archivo temporal de entrada
+                    if os.path.exists(temp_input_path):
+                        os.unlink(temp_input_path)
+                
+                progress_bar.progress((i + 1) / total_files)
         
-        st.markdown('</div>', unsafe_allow_html=True)
+        status_text.text("")
+        
+        # Mostrar sección de descargas
+        if successful_conversions > 0:
+            st.markdown("---")
+            st.markdown('<div class="download-section">', unsafe_allow_html=True)
+            st.subheader("📥 Descargar Archivos Convertidos")
+            
+            if successful_conversions == 1:
+                # Descarga individual
+                pdf_info = converted_files[0]
+                
+                with open(pdf_info['path'], 'rb') as f:
+                    st.download_button(
+                        label=f"📄 Descargar {pdf_info['name']}",
+                        data=f,
+                        file_name=pdf_info['name'],
+                        mime="application/pdf",
+                        type="primary",
+                        key=f"download_{pdf_info['name']}"
+                    )
+                    
+            else:
+                # Descarga múltiple - crear ZIP
+                col1, col2 = st.columns([2, 1])
+                
+                with col1:
+                    st.write(f"**{successful_conversions} archivos convertidos exitosamente**")
+                    
+                with col2:
+                    zip_path = Path(temp_dir) / "documentos_convertidos.zip"
+                    
+                    try:
+                        with zipfile.ZipFile(zip_path, 'w') as zipf:
+                            for pdf_info in converted_files:
+                                if os.path.exists(pdf_info['path']):
+                                    zipf.write(pdf_info['path'], pdf_info['name'])
+                        
+                        with open(zip_path, 'rb') as f:
+                            st.download_button(
+                                label="📦 Descargar todos los PDFs (ZIP)",
+                                data=f,
+                                file_name="documentos_convertidos.zip",
+                                mime="application/zip",
+                                type="primary",
+                                key="zip_download"
+                            )
+                    except Exception as e:
+                        st.error(f"Error creando ZIP: {e}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
     
     # Resumen final
     if successful_conversions > 0:
         st.balloons()
         st.success(f"🎉 Conversión completada! {successful_conversions}/{total_files} archivos convertidos")
+        
+        # Mostrar nombres de archivos convertidos
+        if successful_conversions > 1:
+            st.write("**Archivos convertidos:**")
+            for result in conversion_results:
+                if result['success']:
+                    st.write(f"• ✅ {result['original_name']} → {result['pdf_name']}")
     else:
         st.error("😞 No se pudo convertir ningún archivo")
 
@@ -649,9 +698,13 @@ def process_zip_file(uploaded_zip, converter):
             converted_files = []
             for filename, (success, message, pdf_path) in results.items():
                 if success:
-                    st.success(f"✅ {filename}")
+                    pdf_name = f"{Path(filename).stem}.pdf"
+                    st.success(f"✅ {filename} → {pdf_name}")
                     if pdf_path and os.path.exists(pdf_path):
-                        converted_files.append(pdf_path)
+                        converted_files.append({
+                            'path': pdf_path,
+                            'name': pdf_name
+                        })
                 else:
                     st.error(f"❌ {filename}: {message}")
             
@@ -664,9 +717,9 @@ def process_zip_file(uploaded_zip, converter):
                 # Crear ZIP con resultados
                 output_zip = Path(temp_dir) / "documentos_convertidos.zip"
                 with zipfile.ZipFile(output_zip, 'w') as zipf:
-                    for pdf_file in converted_files:
-                        if os.path.exists(pdf_file):
-                            zipf.write(pdf_file, os.path.basename(pdf_file))
+                    for pdf_info in converted_files:
+                        if os.path.exists(pdf_info['path']):
+                            zipf.write(pdf_info['path'], pdf_info['name'])
                 
                 # Botón de descarga
                 with open(output_zip, 'rb') as f:
@@ -694,10 +747,10 @@ def main():
     st.markdown("""
     <div class="info-box">
     💡 <strong>Novedades:</strong> 
-    - ✅ Soporte completo para archivos .DOC (conversión básica)
-    - 📋 Mejor extracción de texto con Antiword y Catdoc
-    - 📥 Botones de descarga mejorados
-    - 🚀 Compatibilidad mejorada
+    - ✅ Soporte mejorado para archivos .DOC (conversión básica de texto)
+    - 📝 Conservación de nombres originales en los PDFs
+    - 🔧 Métodos alternativos para archivos .DOC sin Antiword/Catdoc
+    - 📥 Descargas con nombres originales preservados
     </div>
     """, unsafe_allow_html=True)
     
@@ -706,19 +759,18 @@ def main():
         st.header("ℹ️ Información")
         st.markdown("""
         **Formatos soportados:**
-        - 📝 DOC (Word) - Conversión básica
-        - 📝 DOCX (Word) - Conversión completa
-        - 📋 RTF (Rich Text)
-        - 📄 TXT (Texto plano)
-        - 📦 ZIP (Carpetas)
+        - 📝 DOC (Word) - Conversión básica de texto
+        - 📝 DOCX (Word) - Conversión completa  
+        - 📋 RTF (Rich Text) - Conversión completa
+        - 📄 TXT (Texto plano) - Conversión completa
+        - 📦 ZIP (Carpetas) - Procesamiento por lotes
         
         **Nota sobre archivos DOC:**
-        Los archivos .DOC tienen conversión básica de texto.
-        Para mejor calidad, guarde como .DOCX.
+        Conversión básica de texto. Para formato completo, guarde como DOCX.
         
         **Límites:**
         - 200MB por archivo
-        - Conversión masiva vía ZIP
+        - Los PDFs conservan nombres originales
         """)
         
         # Verificar dependencias
@@ -729,13 +781,13 @@ def main():
             st.write(f"{status} {dep}")
             
         # Información específica sobre DOC
-        if not deps['antiword'] and not deps['catdoc']:
-            st.markdown("""
-            <div class="warning-box">
-            ⚠️ <strong>Archivos .DOC:</strong> 
-            Sin Antiword/Catdoc, la conversión de .DOC será muy básica.
-            </div>
-            """, unsafe_allow_html=True)
+        st.markdown("""
+        <div class="warning-box">
+        ⚠️ <strong>Archivos .DOC:</strong> 
+        Conversión básica de texto disponible.
+        Para conversión completa, use versión local con LibreOffice.
+        </div>
+        """, unsafe_allow_html=True)
     
     # Pestañas principales
     tab1, tab2, tab3 = st.tabs(["📤 Subir Archivos", "📁 Subir Carpeta ZIP", "📊 Historial"])
