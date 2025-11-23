@@ -7,9 +7,9 @@ import zipfile
 import shutil
 import subprocess
 import logging
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 import time
-import requests
+import base64
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -32,6 +32,7 @@ class DocumentConverter:
         dependencies = {
             'pandoc': self._check_pandoc(),
             'python-docx': self._check_python_docx(),
+            'wkhtmltopdf': self._check_wkhtmltopdf(),
         }
         return dependencies
     
@@ -52,15 +53,24 @@ class DocumentConverter:
         except ImportError:
             return False
     
-    def convert_document(self, input_path: str, output_dir: str = None) -> Tuple[bool, str]:
-        """Convierte un documento a PDF"""
+    def _check_wkhtmltopdf(self) -> bool:
+        """Verifica si wkhtmltopdf está instalado"""
+        try:
+            result = subprocess.run(['wkhtmltopdf', '--version'], 
+                                  capture_output=True, text=True, timeout=10)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def convert_document(self, input_path: str, output_dir: str = None) -> Tuple[bool, str, str]:
+        """Convierte un documento a PDF - retorna (éxito, mensaje, ruta_pdf)"""
         input_path = Path(input_path)
         
         if not input_path.exists():
-            return False, f"Archivo no encontrado: {input_path}"
+            return False, f"Archivo no encontrado: {input_path}", ""
         
         if input_path.stat().st_size > self.max_file_size:
-            return False, f"Archivo demasiado grande: {input_path}"
+            return False, f"Archivo demasiado grande: {input_path}", ""
         
         if output_dir is None:
             output_dir = input_path.parent
@@ -82,24 +92,24 @@ class DocumentConverter:
             elif extension == '.odt':
                 success, message = self._convert_odt(input_path, output_path)
             else:
-                return False, f"Formato no soportado: {extension}"
+                return False, f"Formato no soportado: {extension}", ""
             
             if success:
                 logger.info(f"Convertido: {input_path.name} → {output_path.name}")
+                return True, message, str(output_path)
             else:
                 logger.error(f"Error convirtiendo {input_path.name}: {message}")
-            
-            return success, message
+                return False, message, ""
             
         except Exception as e:
             error_msg = f"Error inesperado: {str(e)}"
             logger.error(error_msg)
-            return False, error_msg
+            return False, error_msg, ""
     
     def _convert_docx(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte DOCX a PDF usando múltiples métodos"""
         methods = [
-            self._convert_with_pandoc,
+            self._convert_with_pandoc_wkhtml,
             self._convert_with_python_docx
         ]
         
@@ -112,31 +122,42 @@ class DocumentConverter:
     
     def _convert_doc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte DOC a PDF"""
-        # Para DOC, intentamos usar un servicio externo o conversión online
-        return self._convert_with_external_service(input_path, output_path)
+        return self._convert_with_pandoc_wkhtml(input_path, output_path)
     
     def _convert_rtf(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte RTF a PDF"""
-        return self._convert_with_pandoc(input_path, output_path)
+        """Convierte RTF a PDF usando wkhtmltopdf"""
+        return self._convert_with_pandoc_wkhtml(input_path, output_path)
     
     def _convert_txt(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte TXT a PDF"""
-        return self._convert_with_pandoc(input_path, output_path)
+        return self._convert_with_pandoc_wkhtml(input_path, output_path)
     
     def _convert_odt(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte ODT a PDF"""
-        return self._convert_with_pandoc(input_path, output_path)
+        return self._convert_with_pandoc_wkhtml(input_path, output_path)
     
-    def _convert_with_pandoc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Conversión usando Pandoc"""
+    def _convert_with_pandoc_wkhtml(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Conversión usando Pandoc con wkhtmltopdf (evita problema de pdflatex)"""
         try:
-            cmd = ['pandoc', str(input_path), '-o', str(output_path)]
+            # Usar wkhtmltopdf como motor PDF
+            cmd = [
+                'pandoc', str(input_path), 
+                '-o', str(output_path),
+                '--pdf-engine=wkhtmltopdf'
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0 and output_path.exists():
-                return True, "Conversión exitosa con Pandoc"
+                return True, "Conversión exitosa con Pandoc (wkhtmltopdf)"
             else:
-                return False, f"Pandoc error: {result.stderr}"
+                # Intentar sin motor específico
+                cmd_fallback = ['pandoc', str(input_path), '-o', str(output_path)]
+                result_fallback = subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=30)
+                
+                if result_fallback.returncode == 0 and output_path.exists():
+                    return True, "Conversión exitosa con Pandoc"
+                else:
+                    return False, f"Pandoc error: {result.stderr or result_fallback.stderr}"
                 
         except subprocess.TimeoutExpired:
             return False, "Timeout en conversión con Pandoc"
@@ -144,103 +165,89 @@ class DocumentConverter:
             return False, f"Error con Pandoc: {str(e)}"
     
     def _convert_with_python_docx(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Conversión usando python-docx (solo para lectura, no conversión directa)"""
+        """Conversión usando python-docx (solo para DOCX)"""
         try:
-            # python-docx solo puede leer DOCX, no convertirlos directamente a PDF
-            # Esto es más para extracción de texto que para conversión real
             from docx import Document
             
             doc = Document(input_path)
             text_content = []
-            for paragraph in doc.paragraphs:
-                text_content.append(paragraph.text)
             
-            # Crear un PDF simple con el texto extraído
-            self._create_simple_pdf(text_content, output_path)
-            return True, "Conversión básica exitosa con python-docx"
+            # Extraer texto de párrafos
+            for paragraph in doc.paragraphs:
+                if paragraph.text.strip():
+                    text_content.append(paragraph.text)
+            
+            # Extraer texto de tablas
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            text_content.append(cell.text)
+            
+            if text_content:
+                # Crear un PDF simple con el texto extraído
+                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                if success:
+                    return True, "Conversión básica exitosa con python-docx"
+                else:
+                    return False, "No se pudo crear PDF desde el texto extraído"
+            else:
+                return False, "No se pudo extraer texto del documento"
             
         except Exception as e:
             return False, f"Error con python-docx: {str(e)}"
     
-    def _convert_with_external_service(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Intenta conversión usando servicios externos (para formatos problemáticos)"""
+    def _create_simple_pdf(self, text_content: List[str], output_path: Path, title: str) -> bool:
+        """Crea un PDF simple con el contenido de texto usando wkhtmltopdf directamente"""
         try:
-            # Método alternativo: convertir a texto primero y luego a PDF
-            if input_path.suffix.lower() == '.doc':
-                # Intentar extraer texto del archivo DOC
-                text_content = self._extract_text_from_doc(input_path)
-                if text_content:
-                    self._create_simple_pdf(text_content, output_path)
-                    return True, "Conversión básica de DOC exitosa"
-            
-            return False, "No se pudo convertir el formato con los métodos disponibles"
-            
-        except Exception as e:
-            return False, f"Error en conversión externa: {str(e)}"
-    
-    def _extract_text_from_doc(self, input_path: Path) -> str:
-        """Intenta extraer texto de archivos DOC"""
-        try:
-            # Método simple: usar strings command o cat para texto plano
-            result = subprocess.run(['strings', str(input_path)], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                return result.stdout
-        except:
-            pass
-        
-        try:
-            # Alternativa: usar cat para archivos de texto
-            result = subprocess.run(['cat', str(input_path)], 
-                                  capture_output=True, text=True)
-            if result.returncode == 0:
-                return result.stdout
-        except:
-            pass
-        
-        return None
-    
-    def _create_simple_pdf(self, text_content, output_path: Path) -> bool:
-        """Crea un PDF simple con el contenido de texto"""
-        try:
-            # Crear un HTML simple y convertirlo a PDF con Pandoc
+            # Crear un HTML simple
             html_content = f"""
             <!DOCTYPE html>
             <html>
             <head>
                 <meta charset="UTF-8">
-                <title>Documento Convertido</title>
+                <title>{title}</title>
                 <style>
-                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
-                    p {{ line-height: 1.6; }}
+                    body {{ 
+                        font-family: Arial, sans-serif; 
+                        margin: 40px;
+                        line-height: 1.6;
+                        color: #333;
+                    }}
+                    h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; }}
+                    .content {{ margin: 20px 0; }}
+                    p {{ margin: 10px 0; }}
                 </style>
             </head>
             <body>
-                {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
+                <h1>{title}</h1>
+                <div class="content">
+                    {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
+                </div>
             </body>
             </html>
             """
             
             # Guardar HTML temporal
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
                 f.write(html_content)
                 html_path = f.name
             
-            # Convertir HTML a PDF
-            cmd = ['pandoc', html_path, '-o', str(output_path)]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            # Convertir HTML a PDF usando wkhtmltopdf directamente
+            cmd = ['wkhtmltopdf', '--enable-local-file-access', html_path, str(output_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             # Limpiar archivo temporal
             if os.path.exists(html_path):
                 os.unlink(html_path)
             
-            return result.returncode == 0
+            return result.returncode == 0 and output_path.exists()
             
         except Exception as e:
             logger.error(f"Error creando PDF simple: {e}")
             return False
     
-    def process_zip_folder(self, zip_path: str, output_dir: str = None) -> Dict[str, Tuple[bool, str]]:
+    def process_zip_folder(self, zip_path: str, output_dir: str = None) -> Dict[str, Tuple[bool, str, str]]:
         """Procesa una carpeta ZIP con múltiples archivos"""
         results = {}
         
@@ -252,12 +259,12 @@ class DocumentConverter:
                 # Convertir todos los archivos soportados
                 for file_path in Path(temp_dir).rglob('*'):
                     if file_path.is_file() and file_path.suffix.lower() in self.supported_formats:
-                        success, message = self.convert_document(file_path, output_dir)
-                        results[file_path.name] = (success, message)
+                        success, message, pdf_path = self.convert_document(file_path, output_dir)
+                        results[file_path.name] = (success, message, pdf_path)
                 
             except Exception as e:
                 logger.error(f"Error procesando ZIP: {str(e)}")
-                results['ZIP Processing'] = (False, f"Error procesando ZIP: {str(e)}")
+                results['ZIP Processing'] = (False, f"Error procesando ZIP: {str(e)}", "")
         
         return results
 
@@ -314,8 +321,23 @@ st.markdown("""
         padding: 15px;
         margin: 10px 0;
     }
+    .download-section {
+        background-color: #e8f5e8;
+        border: 2px solid #4caf50;
+        border-radius: 10px;
+        padding: 20px;
+        margin: 20px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+def get_binary_file_downloader_html(bin_file, file_label, button_text):
+    """Genera HTML para descargar archivos"""
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    bin_str = base64.b64encode(data).decode()
+    href = f'<a href="data:application/octet-stream;base64,{bin_str}" download="{os.path.basename(bin_file)}" style="text-decoration: none;">{button_text}</a>'
+    return href
 
 def process_uploaded_files(uploaded_files, converter):
     """Procesar archivos subidos individualmente"""
@@ -334,12 +356,13 @@ def process_uploaded_files(uploaded_files, converter):
     results_container = st.container()
     
     converted_files = []
+    conversion_results = []
     
     with results_container:
-        st.subheader("Resultados de la conversión:")
+        st.subheader("📊 Progreso de Conversión")
         
         for i, uploaded_file in enumerate(uploaded_files):
-            status_text.text(f"Procesando {i+1}/{total_files}: {uploaded_file.name}")
+            status_text.text(f"🔄 Procesando {i+1}/{total_files}: {uploaded_file.name}")
             
             # Guardar archivo temporal
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
@@ -348,7 +371,7 @@ def process_uploaded_files(uploaded_files, converter):
             
             try:
                 # Convertir archivo
-                success, message = converter.convert_document(tmp_path)
+                success, message, pdf_path = converter.convert_document(tmp_path)
                 
                 # Registrar en historial
                 timestamp = time.strftime("%H:%M:%S")
@@ -362,11 +385,16 @@ def process_uploaded_files(uploaded_files, converter):
                     'message': message
                 })
                 
+                conversion_results.append({
+                    'original_name': uploaded_file.name,
+                    'success': success,
+                    'message': message,
+                    'pdf_path': pdf_path
+                })
+                
                 if success:
                     successful_conversions += 1
-                    # Guardar ruta del archivo convertido
-                    pdf_path = Path(tmp_path).parent / output_file
-                    if pdf_path.exists():
+                    if pdf_path and os.path.exists(pdf_path):
                         converted_files.append(pdf_path)
                     st.success(f"✅ {uploaded_file.name} → {output_file}")
                 else:
@@ -392,54 +420,70 @@ def process_uploaded_files(uploaded_files, converter):
     
     status_text.text("")
     
-    # Resumen final y descargas
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        if successful_conversions > 0:
-            st.balloons()
-            st.success(f"🎉 Conversión completada! {successful_conversions}/{total_files} archivos convertidos")
-        else:
-            st.error("😞 No se pudo convertir ningún archivo")
-    
-    with col2:
-        # Botones de descarga
-        if successful_conversions == 1 and converted_files:
+    # Mostrar sección de descargas
+    if successful_conversions > 0:
+        st.markdown("---")
+        st.markdown('<div class="download-section">', unsafe_allow_html=True)
+        st.subheader("📥 Descargar Archivos Convertidos")
+        
+        if successful_conversions == 1:
+            # Descarga individual
             pdf_path = converted_files[0]
+            original_name = Path(conversion_results[0]['original_name']).stem
+            download_name = f"{original_name}.pdf"
+            
             with open(pdf_path, 'rb') as f:
                 st.download_button(
-                    label="📥 Descargar PDF",
+                    label=f"📄 Descargar {download_name}",
                     data=f,
-                    file_name=pdf_path.name,
+                    file_name=download_name,
                     mime="application/pdf",
-                    type="primary"
+                    type="primary",
+                    key="single_download"
                 )
-        elif successful_conversions > 1:
-            # Crear ZIP con múltiples PDFs
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
-                zip_path = tmp_zip.name
-            
-            try:
-                with zipfile.ZipFile(zip_path, 'w') as zipf:
-                    for pdf_file in converted_files:
-                        if pdf_file.exists():
-                            zipf.write(pdf_file, pdf_file.name)
                 
-                with open(zip_path, 'rb') as f:
-                    st.download_button(
-                        label="📥 Descargar todos los PDFs (ZIP)",
-                        data=f,
-                        file_name="documentos_convertidos.zip",
-                        mime="application/zip",
-                        type="primary"
-                    )
-            finally:
-                if os.path.exists(zip_path):
-                    os.unlink(zip_path)
+        else:
+            # Descarga múltiple - crear ZIP
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.write(f"**{successful_conversions} archivos convertidos exitosamente**")
+                
+            with col2:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
+                    zip_path = tmp_zip.name
+                
+                try:
+                    with zipfile.ZipFile(zip_path, 'w') as zipf:
+                        for pdf_file in converted_files:
+                            if os.path.exists(pdf_file):
+                                zipf.write(pdf_file, os.path.basename(pdf_file))
+                    
+                    with open(zip_path, 'rb') as f:
+                        st.download_button(
+                            label="📦 Descargar todos los PDFs (ZIP)",
+                            data=f,
+                            file_name="documentos_convertidos.zip",
+                            mime="application/zip",
+                            type="primary",
+                            key="zip_download"
+                        )
+                finally:
+                    if os.path.exists(zip_path):
+                        os.unlink(zip_path)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Resumen final
+    if successful_conversions > 0:
+        st.balloons()
+        st.success(f"🎉 Conversión completada! {successful_conversions}/{total_files} archivos convertidos")
+    else:
+        st.error("😞 No se pudo convertir ningún archivo")
 
 def process_zip_file(uploaded_zip, converter):
     """Procesar archivo ZIP"""
-    with st.spinner("Procesando archivo ZIP..."):
+    with st.spinner("📦 Procesando archivo ZIP..."):
         with tempfile.TemporaryDirectory() as temp_dir:
             zip_path = Path(temp_dir) / uploaded_zip.name
             zip_path.write_bytes(uploaded_zip.getvalue())
@@ -451,32 +495,44 @@ def process_zip_file(uploaded_zip, converter):
             total = len(results)
             
             # Mostrar resultados
-            st.subheader("Resultados de la conversión:")
+            st.subheader("📊 Resultados de la conversión:")
             
-            for filename, (success, message) in results.items():
+            converted_files = []
+            for filename, (success, message, pdf_path) in results.items():
                 if success:
                     st.success(f"✅ {filename}")
+                    if pdf_path and os.path.exists(pdf_path):
+                        converted_files.append(pdf_path)
                 else:
                     st.error(f"❌ {filename}: {message}")
             
+            # Sección de descargas para ZIP
             if successful > 0:
-                st.success(f"📊 {successful}/{total} archivos convertidos exitosamente")
+                st.markdown("---")
+                st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                st.subheader("📥 Descargar Archivos Convertidos")
                 
                 # Crear ZIP con resultados
-                output_zip = Path(temp_dir) / "converted_pdfs.zip"
+                output_zip = Path(temp_dir) / "documentos_convertidos.zip"
                 with zipfile.ZipFile(output_zip, 'w') as zipf:
-                    for pdf_file in Path(temp_dir).glob("*.pdf"):
-                        zipf.write(pdf_file, pdf_file.name)
+                    for pdf_file in converted_files:
+                        if os.path.exists(pdf_file):
+                            zipf.write(pdf_file, os.path.basename(pdf_file))
                 
                 # Botón de descarga
                 with open(output_zip, 'rb') as f:
                     st.download_button(
-                        label="📥 Descargar PDFs en ZIP",
+                        label=f"📦 Descargar {successful} archivos PDF (ZIP)",
                         data=f,
                         file_name="documentos_convertidos.zip",
                         mime="application/zip",
-                        type="primary"
+                        type="primary",
+                        key="zip_result_download"
                     )
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                st.success(f"📊 {successful}/{total} archivos convertidos exitosamente")
             else:
                 st.error("No se pudo convertir ningún archivo del ZIP")
 
@@ -488,8 +544,10 @@ def main():
     # Información importante
     st.markdown("""
     <div class="info-box">
-    💡 <strong>Nota importante:</strong> Esta versión usa Pandoc para la conversión. 
-    Para mejor compatibilidad con archivos DOC complejos, se recomienda ejecutar localmente con LibreOffice instalado.
+    💡 <strong>Novedades:</strong> 
+    - ✅ Soporte mejorado para archivos RTF
+    - 📥 Botones de descarga restaurados
+    - 🚀 Mejor compatibilidad con todos los formatos
     </div>
     """, unsafe_allow_html=True)
     
@@ -516,7 +574,9 @@ def main():
             st.write(f"{status} {dep}")
             
         if not deps['pandoc']:
-            st.error("Pandoc no está disponible. Algunas conversiones pueden fallar.")
+            st.error("Pandoc no está disponible")
+        if not deps['wkhtmltopdf']:
+            st.warning("wkhtmltopdf no disponible - algunas conversiones pueden fallar")
     
     # Pestañas principales
     tab1, tab2, tab3 = st.tabs(["📤 Subir Archivos", "📁 Subir Carpeta ZIP", "📊 Historial"])
@@ -533,7 +593,7 @@ def main():
         )
         
         if uploaded_files:
-            st.subheader("Archivos subidos:")
+            st.subheader("📁 Archivos subidos:")
             
             # Mostrar información de archivos
             for uploaded_file in uploaded_files:
@@ -560,16 +620,18 @@ def main():
         )
         
         if uploaded_zip:
-            st.success(f"📦 Carpeta ZIP cargada: {uploaded_zip.name}")
+            file_size = uploaded_zip.size / (1024 * 1024)  # MB
+            st.success(f"📦 Carpeta ZIP cargada: {uploaded_zip.name} ({file_size:.1f} MB)")
             
             if st.button("🔄 Procesar Carpeta ZIP", type="primary", key="convert_zip"):
                 process_zip_file(uploaded_zip, converter)
     
     with tab3:
-        st.header("Registro de Actividad")
+        st.header("📋 Registro de Actividad")
         
         # Mostrar historial de conversiones
         if 'conversion_history' in st.session_state and st.session_state.conversion_history:
+            st.write(f"**Últimas {len(st.session_state.conversion_history)} conversiones:**")
             for entry in reversed(st.session_state.conversion_history[-10:]):  # Mostrar últimos 10
                 if entry['success']:
                     st.markdown(f"""
@@ -583,6 +645,11 @@ def main():
                         ❌ [{entry['timestamp']}] Error: {entry['input']} - {entry['message']}
                     </div>
                     """, unsafe_allow_html=True)
+            
+            # Botón para limpiar historial
+            if st.button("🗑️ Limpiar Historial", key="clear_history"):
+                st.session_state.conversion_history = []
+                st.rerun()
         else:
             st.info("No hay actividad reciente")
 
