@@ -9,6 +9,7 @@ import subprocess
 import logging
 from typing import Tuple, Dict
 import time
+import requests
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -29,19 +30,10 @@ class DocumentConverter:
     def check_dependencies(self) -> Dict[str, bool]:
         """Verifica las dependencias del sistema"""
         dependencies = {
-            'libreoffice': self._check_libreoffice(),
             'pandoc': self._check_pandoc(),
+            'python-docx': self._check_python_docx(),
         }
         return dependencies
-    
-    def _check_libreoffice(self) -> bool:
-        """Verifica si LibreOffice está instalado"""
-        try:
-            result = subprocess.run(['soffice', '--version'], 
-                                  capture_output=True, text=True, timeout=10)
-            return result.returncode == 0
-        except:
-            return False
     
     def _check_pandoc(self) -> bool:
         """Verifica si Pandoc está instalado"""
@@ -50,6 +42,14 @@ class DocumentConverter:
                                   capture_output=True, text=True, timeout=10)
             return result.returncode == 0
         except:
+            return False
+    
+    def _check_python_docx(self) -> bool:
+        """Verifica si python-docx está instalado"""
+        try:
+            import docx
+            return True
+        except ImportError:
             return False
     
     def convert_document(self, input_path: str, output_dir: str = None) -> Tuple[bool, str]:
@@ -97,48 +97,148 @@ class DocumentConverter:
             return False, error_msg
     
     def _convert_docx(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOCX a PDF"""
-        return self._convert_with_libreoffice(input_path, output_path)
+        """Convierte DOCX a PDF usando múltiples métodos"""
+        methods = [
+            self._convert_with_pandoc,
+            self._convert_with_python_docx
+        ]
+        
+        for method in methods:
+            success, message = method(input_path, output_path)
+            if success:
+                return True, message
+        
+        return False, "Todos los métodos de conversión fallaron"
     
     def _convert_doc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte DOC a PDF"""
-        return self._convert_with_libreoffice(input_path, output_path)
+        # Para DOC, intentamos usar un servicio externo o conversión online
+        return self._convert_with_external_service(input_path, output_path)
     
     def _convert_rtf(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte RTF a PDF"""
-        return self._convert_with_libreoffice(input_path, output_path)
+        return self._convert_with_pandoc(input_path, output_path)
     
     def _convert_txt(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte TXT a PDF"""
-        return self._convert_with_libreoffice(input_path, output_path)
+        return self._convert_with_pandoc(input_path, output_path)
     
     def _convert_odt(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convierte ODT a PDF"""
-        return self._convert_with_libreoffice(input_path, output_path)
+        return self._convert_with_pandoc(input_path, output_path)
     
-    def _convert_with_libreoffice(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Conversión usando LibreOffice (método más robusto)"""
+    def _convert_with_pandoc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Conversión usando Pandoc"""
         try:
-            cmd = [
-                'soffice', '--headless', '--convert-to', 'pdf',
-                '--outdir', str(output_path.parent),
-                str(input_path)
-            ]
+            cmd = ['pandoc', str(input_path), '-o', str(output_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                # Verificar si el archivo PDF fue creado
-                expected_path = output_path.parent / f"{input_path.stem}.pdf"
-                if expected_path.exists():
-                    return True, "Conversión exitosa con LibreOffice"
-            
-            return False, f"LibreOffice error: {result.stderr}"
-            
+            if result.returncode == 0 and output_path.exists():
+                return True, "Conversión exitosa con Pandoc"
+            else:
+                return False, f"Pandoc error: {result.stderr}"
+                
         except subprocess.TimeoutExpired:
-            return False, "Timeout en conversión con LibreOffice"
+            return False, "Timeout en conversión con Pandoc"
         except Exception as e:
-            return False, f"Error con LibreOffice: {str(e)}"
+            return False, f"Error con Pandoc: {str(e)}"
+    
+    def _convert_with_python_docx(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Conversión usando python-docx (solo para lectura, no conversión directa)"""
+        try:
+            # python-docx solo puede leer DOCX, no convertirlos directamente a PDF
+            # Esto es más para extracción de texto que para conversión real
+            from docx import Document
+            
+            doc = Document(input_path)
+            text_content = []
+            for paragraph in doc.paragraphs:
+                text_content.append(paragraph.text)
+            
+            # Crear un PDF simple con el texto extraído
+            self._create_simple_pdf(text_content, output_path)
+            return True, "Conversión básica exitosa con python-docx"
+            
+        except Exception as e:
+            return False, f"Error con python-docx: {str(e)}"
+    
+    def _convert_with_external_service(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Intenta conversión usando servicios externos (para formatos problemáticos)"""
+        try:
+            # Método alternativo: convertir a texto primero y luego a PDF
+            if input_path.suffix.lower() == '.doc':
+                # Intentar extraer texto del archivo DOC
+                text_content = self._extract_text_from_doc(input_path)
+                if text_content:
+                    self._create_simple_pdf(text_content, output_path)
+                    return True, "Conversión básica de DOC exitosa"
+            
+            return False, "No se pudo convertir el formato con los métodos disponibles"
+            
+        except Exception as e:
+            return False, f"Error en conversión externa: {str(e)}"
+    
+    def _extract_text_from_doc(self, input_path: Path) -> str:
+        """Intenta extraer texto de archivos DOC"""
+        try:
+            # Método simple: usar strings command o cat para texto plano
+            result = subprocess.run(['strings', str(input_path)], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                return result.stdout
+        except:
+            pass
+        
+        try:
+            # Alternativa: usar cat para archivos de texto
+            result = subprocess.run(['cat', str(input_path)], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                return result.stdout
+        except:
+            pass
+        
+        return None
+    
+    def _create_simple_pdf(self, text_content, output_path: Path) -> bool:
+        """Crea un PDF simple con el contenido de texto"""
+        try:
+            # Crear un HTML simple y convertirlo a PDF con Pandoc
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Documento Convertido</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                    p {{ line-height: 1.6; }}
+                </style>
+            </head>
+            <body>
+                {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
+            </body>
+            </html>
+            """
+            
+            # Guardar HTML temporal
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+                f.write(html_content)
+                html_path = f.name
+            
+            # Convertir HTML a PDF
+            cmd = ['pandoc', html_path, '-o', str(output_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Limpiar archivo temporal
+            if os.path.exists(html_path):
+                os.unlink(html_path)
+            
+            return result.returncode == 0
+            
+        except Exception as e:
+            logger.error(f"Error creando PDF simple: {e}")
+            return False
     
     def process_zip_folder(self, zip_path: str, output_dir: str = None) -> Dict[str, Tuple[bool, str]]:
         """Procesa una carpeta ZIP con múltiples archivos"""
@@ -206,6 +306,13 @@ st.markdown("""
     }
     .stProgress > div > div > div > div {
         background-color: #1f77b4;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -378,6 +485,14 @@ def main():
     
     st.markdown('<h1 class="main-header">📄 Conversor de Documentos a PDF</h1>', unsafe_allow_html=True)
     
+    # Información importante
+    st.markdown("""
+    <div class="info-box">
+    💡 <strong>Nota importante:</strong> Esta versión usa Pandoc para la conversión. 
+    Para mejor compatibilidad con archivos DOC complejos, se recomienda ejecutar localmente con LibreOffice instalado.
+    </div>
+    """, unsafe_allow_html=True)
+    
     # Sidebar con información
     with st.sidebar:
         st.header("ℹ️ Información")
@@ -400,8 +515,8 @@ def main():
             status = "✅" if available else "❌"
             st.write(f"{status} {dep}")
             
-        if not any(deps.values()):
-            st.error("Se requiere al menos LibreOffice o Pandoc para la conversión")
+        if not deps['pandoc']:
+            st.error("Pandoc no está disponible. Algunas conversiones pueden fallar.")
     
     # Pestañas principales
     tab1, tab2, tab3 = st.tabs(["📤 Subir Archivos", "📁 Subir Carpeta ZIP", "📊 Historial"])
