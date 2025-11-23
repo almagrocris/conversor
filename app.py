@@ -10,6 +10,8 @@ import logging
 from typing import Tuple, Dict, List
 import time
 import base64
+import requests
+import json
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
@@ -26,6 +28,10 @@ class DocumentConverter:
         }
         
         self.max_file_size = 200 * 1024 * 1024  # 200MB
+        self.conversion_apis = [
+            "https://api.convertio.co/convert",
+            "https://v2.convertapi.com/convert/doc/to/pdf",
+        ]
         
     def check_dependencies(self) -> Dict[str, bool]:
         """Verifica las dependencias del sistema"""
@@ -33,6 +39,7 @@ class DocumentConverter:
             'pandoc': self._check_pandoc(),
             'python-docx': self._check_python_docx(),
             'wkhtmltopdf': self._check_wkhtmltopdf(),
+            'conexión_internet': self._check_internet(),
         }
         return dependencies
     
@@ -62,6 +69,14 @@ class DocumentConverter:
         except:
             return False
     
+    def _check_internet(self) -> bool:
+        """Verifica conexión a internet"""
+        try:
+            response = requests.get("https://www.google.com", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+    
     def convert_document(self, input_path: str, output_path: str = None) -> Tuple[bool, str, str]:
         """Convierte un documento a PDF - retorna (éxito, mensaje, ruta_pdf)"""
         input_path = Path(input_path)
@@ -85,7 +100,7 @@ class DocumentConverter:
             if extension == '.docx':
                 success, message = self._convert_docx(input_path, output_path)
             elif extension == '.doc':
-                success, message = self._convert_doc(input_path, output_path)
+                success, message = self._convert_doc_enhanced(input_path, output_path)
             elif extension == '.rtf':
                 success, message = self._convert_rtf(input_path, output_path)
             elif extension == '.txt':
@@ -121,11 +136,12 @@ class DocumentConverter:
         
         return False, "Todos los métodos de conversión fallaron"
     
-    def _convert_doc(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Convierte DOC a PDF usando métodos específicos para DOC"""
+    def _convert_doc_enhanced(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Convierte DOC a PDF usando métodos mejorados"""
         methods = [
+            self._convert_doc_with_online_service,
+            self._convert_doc_with_advanced_text_extraction,
             self._convert_doc_with_python_docx_fallback,
-            self._convert_doc_with_text_extraction,
             self._convert_doc_with_fallback
         ]
         
@@ -177,23 +193,30 @@ class DocumentConverter:
             doc = Document(input_path)
             text_content = []
             
-            # Extraer texto de párrafos
+            # Extraer texto de párrafos con formato mejorado
             for paragraph in doc.paragraphs:
                 if paragraph.text.strip():
-                    text_content.append(paragraph.text)
+                    # Detectar estilos básicos
+                    style = paragraph.style.name if paragraph.style else "Normal"
+                    if style != "Normal":
+                        text_content.append(f"**{paragraph.text}**")
+                    else:
+                        text_content.append(paragraph.text)
             
             # Extraer texto de tablas
             for table in doc.tables:
+                text_content.append("--- TABLA ---")
                 for row in table.rows:
-                    for cell in row.cells:
-                        if cell.text.strip():
-                            text_content.append(cell.text)
+                    row_text = " | ".join(cell.text for cell in row.cells if cell.text.strip())
+                    if row_text:
+                        text_content.append(row_text)
+                text_content.append("--- FIN TABLA ---")
             
             if text_content:
-                # Crear un PDF simple con el texto extraído
-                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                # Crear un PDF mejorado con el texto extraído
+                success = self._create_enhanced_pdf(text_content, output_path, input_path.stem)
                 if success:
-                    return True, "Conversión básica exitosa con python-docx"
+                    return True, "Conversión mejorada exitosa con python-docx"
                 else:
                     return False, "No se pudo crear PDF desde el texto extraído"
             else:
@@ -202,10 +225,151 @@ class DocumentConverter:
         except Exception as e:
             return False, f"Error con python-docx: {str(e)}"
     
-    def _convert_doc_with_python_docx_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Intenta leer DOC como DOCX (puede funcionar en algunos casos)"""
+    def _convert_doc_with_online_service(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Intenta conversión usando servicio online gratuito"""
         try:
-            # Algunos archivos DOC pueden ser leídos por python-docx
+            # Servicio 1: LibreOffice Online (demo)
+            online_url = "https://convertapi.com"  # Servicio demo
+            
+            with open(input_path, 'rb') as f:
+                files = {'file': f}
+                response = requests.post(
+                    f"{online_url}/convert/doc/to/pdf",
+                    files=files,
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    with open(output_path, 'wb') as out_f:
+                        out_f.write(response.content)
+                    return True, "Conversión exitosa con servicio online"
+            
+            return False, "Servicio online no disponible"
+            
+        except Exception as e:
+            return False, f"Error con servicio online: {str(e)}"
+    
+    def _convert_doc_with_advanced_text_extraction(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Extrae texto de archivos DOC usando métodos avanzados"""
+        try:
+            # Método 1: Usar catdoc si está disponible
+            text_content = self._extract_with_catdoc(input_path)
+            
+            if not text_content:
+                # Método 2: Extracción binaria mejorada
+                text_content = self._extract_text_advanced(input_path)
+            
+            if text_content:
+                success = self._create_enhanced_pdf(text_content, output_path, input_path.stem)
+                if success:
+                    return True, "Conversión mejorada exitosa (texto avanzado)"
+            
+            return False, "No se pudo extraer texto avanzado del archivo DOC"
+            
+        except Exception as e:
+            return False, f"Error en extracción avanzada: {str(e)}"
+    
+    def _extract_with_catdoc(self, input_path: Path) -> List[str]:
+        """Intenta usar catdoc si está disponible en el sistema"""
+        try:
+            result = subprocess.run(
+                ['catdoc', '-w', str(input_path)], 
+                capture_output=True, text=True, timeout=30, 
+                encoding='utf-8', errors='ignore'
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.split('\n')
+                return [line.strip() for line in lines if line.strip()]
+            
+            return []
+            
+        except:
+            return []
+    
+    def _extract_text_advanced(self, input_path: Path) -> List[str]:
+        """Extracción avanzada de texto de archivos DOC"""
+        try:
+            with open(input_path, 'rb') as f:
+                content = f.read()
+            
+            text_content = []
+            
+            # Buscar patrones de texto en diferentes codificaciones
+            encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+            
+            for encoding in encodings:
+                try:
+                    decoded = content.decode(encoding, errors='ignore')
+                    lines = decoded.split('\n')
+                    
+                    # Filtrar y limpiar líneas
+                    cleaned_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if (len(line) > 10 and 
+                            any(c.isalpha() for c in line) and
+                            not line.startswith('ÿ') and
+                            not all(c in '�?�' for c in line)):
+                            
+                            # Limpiar caracteres extraños
+                            line = ''.join(char for char in line if ord(char) < 127 or char in 'áéíóúÁÉÍÓÚñÑ')
+                            cleaned_lines.append(line)
+                    
+                    if len(cleaned_lines) > 5:  # Si encontramos suficiente texto
+                        text_content = cleaned_lines
+                        break
+                        
+                except UnicodeDecodeError:
+                    continue
+            
+            # Si no encontramos texto con decodificación directa, usar strings
+            if not text_content:
+                text_content = self._extract_text_with_strings_advanced(input_path)
+            
+            return text_content
+            
+        except Exception as e:
+            logger.error(f"Error en extracción avanzada: {e}")
+            return []
+    
+    def _extract_text_with_strings_advanced(self, input_path: Path) -> List[str]:
+        """Extrae texto legible usando strings con filtros avanzados"""
+        try:
+            result = subprocess.run(
+                ['strings', '-n', '4', str(input_path)], 
+                capture_output=True, text=True, timeout=30, 
+                encoding='utf-8', errors='ignore'
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.split('\n')
+                
+                # Filtros avanzados para texto legible
+                text_content = []
+                for line in lines:
+                    line = line.strip()
+                    if (len(line) >= 15 and  # Líneas más largas
+                        sum(c.isalpha() for c in line) > len(line) * 0.4 and  # Al menos 40% letras
+                        not any(word in line.lower() for word in ['page', 'section', 'header', 'footer']) and
+                        not line.startswith(('ÿ', '%%', '<<', '>>')) and
+                        'www.' not in line.lower() and
+                        '.com' not in line.lower() and
+                        not all(c in '.-=*_' for c in line.replace(' ', ''))):
+                        
+                        text_content.append(line)
+                
+                return text_content
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error con strings avanzado: {e}")
+            return []
+    
+    def _convert_doc_with_python_docx_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
+        """Intenta leer DOC como DOCX (para algunos archivos modernos)"""
+        try:
             from docx import Document
             
             doc = Document(input_path)
@@ -216,7 +380,7 @@ class DocumentConverter:
                     text_content.append(paragraph.text)
             
             if text_content:
-                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+                success = self._create_enhanced_pdf(text_content, output_path, input_path.stem)
                 if success:
                     return True, "Conversión básica exitosa (DOC leído como DOCX)"
             
@@ -225,121 +389,45 @@ class DocumentConverter:
         except Exception as e:
             return False, f"Error leyendo DOC: {str(e)}"
     
-    def _convert_doc_with_text_extraction(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Extrae texto de archivos DOC usando métodos nativos de Python"""
-        try:
-            # Método 1: Intentar leer como texto binario
-            text_content = self._extract_text_from_binary_doc(input_path)
-            
-            if not text_content:
-                # Método 2: Usar strings para extraer texto legible
-                text_content = self._extract_text_with_strings(input_path)
-            
-            if text_content:
-                success = self._create_simple_pdf(text_content, output_path, input_path.stem)
-                if success:
-                    return True, "Conversión básica exitosa (extracción de texto)"
-            
-            return False, "No se pudo extraer texto legible del archivo DOC"
-            
-        except Exception as e:
-            return False, f"Error en extracción de texto: {str(e)}"
-    
-    def _extract_text_from_binary_doc(self, input_path: Path) -> List[str]:
-        """Intenta extraer texto de archivos DOC leyendo como binario"""
-        try:
-            with open(input_path, 'rb') as f:
-                content = f.read()
-            
-            # Decodificar intentando diferentes codificaciones
-            text_content = []
-            for encoding in ['utf-8', 'latin-1', 'cp1252']:
-                try:
-                    decoded = content.decode(encoding, errors='ignore')
-                    # Filtrar líneas que parecen texto legible
-                    lines = decoded.split('\n')
-                    readable_lines = [
-                        line.strip() for line in lines 
-                        if len(line.strip()) > 3 
-                        and any(c.isalpha() for c in line)
-                        and not all(c in '�?�' for c in line.strip())
-                    ]
-                    if readable_lines:
-                        text_content = readable_lines
-                        break
-                except:
-                    continue
-            
-            return text_content
-            
-        except Exception as e:
-            logger.error(f"Error en extracción binaria: {e}")
-            return []
-    
-    def _extract_text_with_strings(self, input_path: Path) -> List[str]:
-        """Extrae texto legible usando el comando strings"""
-        try:
-            result = subprocess.run(
-                ['strings', '-n', '4', str(input_path)], 
-                capture_output=True, text=True, timeout=30, 
-                encoding='utf-8', errors='ignore'
-            )
-            
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.split('\n')
-                # Filtrar líneas que parecen texto legible
-                text_content = [
-                    line.strip() for line in lines 
-                    if len(line.strip()) > 10 
-                    and any(c.isalpha() for c in line)
-                    and not line.strip().startswith('%%%%')
-                    and not all(c in '.-=*' for c in line.strip())
-                ]
-                return text_content
-            
-            return []
-            
-        except Exception as e:
-            logger.error(f"Error con strings: {e}")
-            return []
-    
     def _convert_doc_with_fallback(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
-        """Método de fallback para archivos DOC - crea un PDF informativo"""
+        """Método de fallback mejorado para archivos DOC"""
         try:
             text_content = [
-                f"Archivo: {input_path.name}",
-                "Formato: Documento de Word (.DOC)",
+                f"📄 Archivo: {input_path.name}",
+                "📋 Formato: Documento de Word (.DOC)",
                 "",
                 "ℹ️ Información sobre la conversión:",
-                "Este archivo .DOC no pudo ser convertido completamente.",
-                "Los archivos .DOC antiguos tienen formato binario",
-                "y requieren herramientas especializadas para su conversión.",
+                "Este archivo .DOC requiere herramientas especializadas",
+                "para una conversión completa con formato preservado.",
                 "",
-                "💡 Sugerencias:",
-                "1. Abra el archivo en Microsoft Word y guárdelo como .DOCX",
-                "2. Use LibreOffice para abrir y guardar como PDF",
-                "3. Utilice una versión local con LibreOffice instalado",
+                "🚀 Soluciones recomendadas:",
+                "1. 📝 Guarde como DOCX en Microsoft Word o LibreOffice",
+                "2. 🌐 Use ConvertAPI.com (servicio online gratuito)",
+                "3. 💻 Instale la versión local con LibreOffice",
+                "4. 🔄 Utilice Google Docs para abrir y exportar como PDF",
                 "",
-                "📞 Soporte:",
-                "Para conversión completa de archivos .DOC,",
-                "se recomienda usar la aplicación local con LibreOffice.",
+                "📞 Para conversión profesional:",
+                "- LibreOffice (gratuito) soporta conversión completa de DOC",
+                "- Microsoft Word (comercial) preserva formato original",
+                "- Servicios online como SmallPDF o ILovePDF",
                 "",
-                f"📅 Fecha de intento: {time.strftime('%d/%m/%Y %H:%M')}"
+                f"📅 Fecha de intento: {time.strftime('%d/%m/%Y %H:%M')}",
+                f"🔧 Sistema: Conversor Streamlit (conversión básica)"
             ]
             
-            success = self._create_simple_pdf(text_content, output_path, input_path.stem)
+            success = self._create_enhanced_pdf(text_content, output_path, input_path.stem)
             if success:
-                return True, "PDF informativo creado (conversión limitada)"
+                return True, "PDF informativo creado - se requiere herramienta externa para conversión completa"
             else:
                 return False, "No se pudo crear PDF informativo"
                 
         except Exception as e:
             return False, f"Error en método de fallback: {str(e)}"
     
-    def _create_simple_pdf(self, text_content: List[str], output_path: Path, title: str) -> bool:
-        """Crea un PDF simple con el contenido de texto usando wkhtmltopdf directamente"""
+    def _create_enhanced_pdf(self, text_content: List[str], output_path: Path, title: str) -> bool:
+        """Crea un PDF mejorado con formato"""
         try:
-            # Crear un HTML simple
+            # Crear un HTML con mejor formato
             html_content = f"""
             <!DOCTYPE html>
             <html>
@@ -348,51 +436,81 @@ class DocumentConverter:
                 <title>{title}</title>
                 <style>
                     body {{ 
-                        font-family: Arial, sans-serif; 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                         margin: 40px;
-                        line-height: 1.6;
-                        color: #333;
+                        line-height: 1.8;
+                        color: #2c3e50;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    }}
+                    .container {{
+                        background: white;
+                        padding: 40px;
+                        border-radius: 15px;
+                        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
                     }}
                     h1 {{ 
                         color: #2c3e50; 
-                        border-bottom: 2px solid #3498db;
-                        padding-bottom: 10px;
+                        border-bottom: 3px solid #3498db;
+                        padding-bottom: 15px;
+                        text-align: center;
+                        font-size: 2.2em;
                     }}
                     .content {{ 
                         margin: 30px 0;
                         background: #f8f9fa;
-                        padding: 20px;
-                        border-radius: 5px;
-                        border-left: 4px solid #3498db;
+                        padding: 25px;
+                        border-radius: 10px;
+                        border-left: 5px solid #3498db;
                     }}
                     p {{ 
-                        margin: 12px 0;
-                        padding: 5px;
+                        margin: 15px 0;
+                        padding: 8px;
+                        font-size: 1.1em;
                     }}
-                    .warning {{
+                    .highlight {{
                         background: #fff3cd;
                         border-left: 4px solid #ffc107;
                         padding: 15px;
-                        margin: 15px 0;
-                        border-radius: 4px;
+                        margin: 20px 0;
+                        border-radius: 8px;
+                        font-weight: bold;
                     }}
                     .info {{
                         background: #d1ecf1;
                         border-left: 4px solid #17a2b8;
-                        padding: 15px;
-                        margin: 15px 0;
-                        border-radius: 4px;
+                        padding: 20px;
+                        margin: 20px 0;
+                        border-radius: 8px;
+                    }}
+                    .solution {{
+                        background: #d4edda;
+                        border-left: 4px solid #28a745;
+                        padding: 18px;
+                        margin: 18px 0;
+                        border-radius: 8px;
+                    }}
+                    .footer {{
+                        text-align: center;
+                        margin-top: 30px;
+                        padding-top: 20px;
+                        border-top: 2px solid #ecf0f1;
+                        color: #7f8c8d;
                     }}
                 </style>
             </head>
             <body>
-                <h1>📄 {title}</h1>
-                <div class="content">
-                    {''.join(f'<p>{line}</p>' for line in text_content if line.strip())}
-                </div>
-                <div class="info">
-                    <strong>Convertido el {time.strftime("%d/%m/%Y a las %H:%M")}</strong><br>
-                    Sistema de conversión de documentos
+                <div class="container">
+                    <h1>📋 {title}</h1>
+                    <div class="content">
+                        {''.join(self._format_content_line(line) for line in text_content if line.strip())}
+                    </div>
+                    <div class="info">
+                        <strong>💡 Convertido el {time.strftime('%d/%m/%Y a las %H:%M')}</strong><br>
+                        <em>Sistema de conversión mejorado de documentos</em>
+                    </div>
+                    <div class="footer">
+                        Generado automáticamente • Preserve el formato original guardando como DOCX
+                    </div>
                 </div>
             </body>
             </html>
@@ -404,7 +522,18 @@ class DocumentConverter:
                 html_path = f.name
             
             # Convertir HTML a PDF usando wkhtmltopdf directamente
-            cmd = ['wkhtmltopdf', '--enable-local-file-access', '--quiet', html_path, str(output_path)]
+            cmd = [
+                'wkhtmltopdf', 
+                '--enable-local-file-access', 
+                '--quiet',
+                '--page-size', 'A4',
+                '--margin-top', '15mm',
+                '--margin-right', '15mm', 
+                '--margin-bottom', '15mm',
+                '--margin-left', '15mm',
+                html_path, 
+                str(output_path)
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             # Limpiar archivo temporal
@@ -414,8 +543,58 @@ class DocumentConverter:
             return result.returncode == 0 and output_path.exists()
             
         except Exception as e:
-            logger.error(f"Error creando PDF simple: {e}")
+            logger.error(f"Error creando PDF mejorado: {e}")
             return False
+    
+    def _format_content_line(self, line: str) -> str:
+        """Formatea líneas de contenido para mejor presentación"""
+        line = line.strip()
+        
+        # Detectar patrones para formato especial
+        if line.startswith('📄') or line.startswith('📋'):
+            return f'<p style="font-size: 1.2em; font-weight: bold; color: #2c3e50;">{line}</p>'
+        elif line.startswith('🚀') or line.startswith('💡'):
+            return f'<p style="font-weight: bold; color: #e74c3c;">{line}</p>'
+        elif line.startswith('🔧') or line.startswith('📅'):
+            return f'<p style="color: #7f8c8d; font-style: italic;">{line}</p>'
+        elif '---' in line:
+            return f'<hr style="border: 1px dashed #bdc3c7; margin: 20px 0;">'
+        elif any(word in line.lower() for word in ['solución', 'recomendada', 'consejo']):
+            return f'<div class="solution">{line}</div>'
+        elif any(word in line.lower() for word in ['información', 'nota', 'importante']):
+            return f'<div class="highlight">{line}</div>'
+        else:
+            return f'<p>{line}</p>'
+    
+    def process_zip_folder(self, zip_path: str, output_dir: str = None) -> Dict[str, Tuple[bool, str, str]]:
+        """Procesa una carpeta ZIP con múltiples archivos"""
+        results = {}
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                
+                # Convertir todos los archivos soportados
+                for file_path in Path(temp_dir).rglob('*'):
+                    if file_path.is_file() and file_path.suffix.lower() in self.supported_formats:
+                        # Definir ruta de salida con nombre original
+                        if output_dir:
+                            pdf_output_path = Path(output_dir) / f"{file_path.stem}.pdf"
+                        else:
+                            pdf_output_path = file_path.parent / f"{file_path.stem}.pdf"
+                        
+                        success, message, pdf_path = self.convert_document(file_path, pdf_output_path)
+                        results[file_path.name] = (success, message, pdf_path)
+                
+            except Exception as e:
+                logger.error(f"Error procesando ZIP: {str(e)}")
+                results['ZIP Processing'] = (False, f"Error procesando ZIP: {str(e)}", "")
+        
+        return results
+
+# El resto del código de Streamlit se mantiene igual...
+# [Aquí iría el resto del código de Streamlit sin cambios]
     
     def process_zip_folder(self, zip_path: str, output_dir: str = None) -> Dict[str, Tuple[bool, str, str]]:
         """Procesa una carpeta ZIP con múltiples archivos"""
